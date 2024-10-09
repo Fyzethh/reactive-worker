@@ -1,0 +1,12 @@
+fastapi==0.115.0
+uvicorn[standard]==0.31.0
+sqlalchemy==2.0.35
+alembic==1.13.3
+pymysql==1.1.0
+sqlalchemy-utils==0.41.1
+cryptography==43.0.1
+# testing
+pytest==6.1.2
+pytest-dotenv==0.5.2
+pytest-cov==3.0.0
+
