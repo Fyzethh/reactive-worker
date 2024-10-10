@@ -2,16 +2,15 @@ package com.demo.worker.worker.service;
 
 import com.demo.worker.worker.model.Client;
 import com.demo.worker.worker.model.Product;
+import com.demo.worker.worker.model.ProductItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors; 
+import java.util.stream.Collectors;
 
 @Service
 public class OrderValidator {
@@ -37,25 +36,33 @@ public class OrderValidator {
                 .doOnError(e -> logger.error("Error al validar el cliente: {}", clientId, e));
     }
 
-    public Mono<Boolean> validateProducts(List<Integer> productIds) {
-        String ids = productIds.stream().map(String::valueOf).collect(Collectors.joining("&ids="));
-        String url = "/products/?ids=" + ids;
-    
-        return apiClient.makeRequestForFlux(url, HttpMethod.GET, null, null, Product.class)
+    public Mono<Boolean> validateProducts(List<ProductItem> productItems) {
+        String productIds = productItems.stream()
+                .map(p -> "ids=" + p.getProductId())
+                .collect(Collectors.joining("&"));
+        
+        return apiClient.makeRequestForFlux("/products/?" + productIds, HttpMethod.GET, null, null, Product.class)
                 .collectList()
                 .map(products -> {
                     if (products == null || products.isEmpty()) {
-                        logger.warn("No se encontraron productos para los IDs: {}", productIds);
+                        logger.warn("No se encontraron productos para los IDs proporcionados: {}", productIds);
                         return false;
                     }
     
-                    boolean allInStock = products.stream().allMatch(product -> product.getStock() > 0);
-                    if (allInStock) {
-                        logger.info("Todos los productos {} tienen stock disponible.", productIds);
-                    } else {
-                        logger.warn("Algunos productos no tienen stock suficiente para los IDs: {}", productIds);
+                    for (ProductItem item : productItems) {
+                        Product product = products.stream()
+                                .filter(p -> p.getId() == item.getProductId())
+                                .findFirst()
+                                .orElse(null);
+    
+                        if (product == null || product.getStock() < item.getQuantity()) {
+                            logger.warn("Producto con ID {} no tiene suficiente stock o no existe.", item.getProductId());
+                            return false;
+                        }
                     }
-                    return allInStock;
+    
+                    logger.info("Todos los productos tienen suficiente stock para el pedido.");
+                    return true;
                 })
                 .defaultIfEmpty(false)
                 .doOnError(e -> logger.error("Error al validar los productos: {}", productIds, e));

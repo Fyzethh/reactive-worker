@@ -1,24 +1,30 @@
 package com.demo.worker.worker.service;
 
 import com.demo.worker.worker.model.Order;
+import com.demo.worker.worker.model.OrderDocument;
+import com.demo.worker.worker.model.ProductItem;
+import com.demo.worker.worker.repository.OrderRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.util.stream.Collectors;
+import java.util.List;
 
 @Service
 public class OrderConsumerService {
 
     private static final Logger logger = LoggerFactory.getLogger(OrderConsumerService.class);
     private final OrderValidator orderValidator;
+    private final OrderRepository orderRepository;
     private final ObjectMapper objectMapper;
 
-    public OrderConsumerService(OrderValidator orderValidator) {
+    public OrderConsumerService(OrderValidator orderValidator, OrderRepository orderRepository) {
         this.orderValidator = orderValidator;
+        this.orderRepository = orderRepository;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -41,34 +47,28 @@ public class OrderConsumerService {
                         return Mono.empty();
                     }
 
-                    return orderValidator.validateProducts(
-                            order.getProducts().stream().map(p -> p.getProductId()).collect(Collectors.toList())
-                    ).map(areProductsValid -> new ValidationResult(isClientValid, areProductsValid));
+                    return orderValidator.validateProducts(order.getProducts());
                 })
-                .flatMap(validationResult -> {
-                    if (!validationResult.areProductsValid) {
-                        logger.warn("Algunos productos no tienen stock suficiente para el pedido: {}", order.getOrderId());
+                .flatMap(isProductsValid -> {
+                    if (!isProductsValid) {
+                        logger.warn("Productos inválidos o sin stock para el pedido: {}", order.getOrderId());
                         return Mono.empty();
                     }
 
-                    logger.info("Pedido válido procesado: {}", order.getOrderId());
-                    return Mono.just(order);
+                    OrderDocument orderDocument = new OrderDocument();
+                    orderDocument.setOrderId(order.getOrderId());
+                    orderDocument.setCustomerId(order.getClientId());
+                    orderDocument.setCustomerName("Nombre del Cliente"); 
+                    orderDocument.setProducts(order.getProducts());
+
+                    return orderRepository.save(orderDocument)
+                        .doOnSuccess(savedOrder -> logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId()));
                 })
-                .doOnError(e -> logger.error("Error en la validación del pedido: {}", order.getOrderId(), e))
+                .doOnError(e -> logger.error("Error en la validación o procesamiento del pedido: {}", order.getOrderId(), e))
                 .subscribe();
 
         } catch (Exception e) {
             logger.error("Error al parsear el mensaje: {}", message, e);
-        }
-    }
-
-    private static class ValidationResult {
-        private final boolean isClientValid;
-        private final boolean areProductsValid;
-
-        public ValidationResult(boolean isClientValid, boolean areProductsValid) {
-            this.isClientValid = isClientValid;
-            this.areProductsValid = areProductsValid;
         }
     }
 }

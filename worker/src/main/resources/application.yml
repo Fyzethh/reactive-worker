@@ -8,3 +8,6 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       properties:
         spring.json.trusted.packages: com.demo.worker.worker
+  data:
+    mongodb:
+      uri: mongodb://mongo:27017/orders
