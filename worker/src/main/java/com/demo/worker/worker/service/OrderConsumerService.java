@@ -1,13 +1,12 @@
 package com.demo.worker.worker.service;
 
-import com.demo.worker.worker.model.Client;
 import com.demo.worker.worker.model.Order;
 import com.demo.worker.worker.model.OrderDocument;
-import com.demo.worker.worker.model.Product;
 import com.demo.worker.worker.model.ProductItem;
 import com.demo.worker.worker.repository.OrderRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -15,7 +14,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class OrderConsumerService {
@@ -23,11 +22,13 @@ public class OrderConsumerService {
     private static final Logger logger = LoggerFactory.getLogger(OrderConsumerService.class);
     private final OrderValidator orderValidator;
     private final OrderRepository orderRepository;
+    private final RedissonClient redissonClient;
     private final ObjectMapper objectMapper;
 
-    public OrderConsumerService(OrderValidator orderValidator, OrderRepository orderRepository) {
+    public OrderConsumerService(OrderValidator orderValidator, OrderRepository orderRepository, RedissonClient redissonClient) {
         this.orderValidator = orderValidator;
         this.orderRepository = orderRepository;
+        this.redissonClient = redissonClient;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -43,47 +44,50 @@ public class OrderConsumerService {
                 return;
             }
 
-            orderValidator.validateClient(order.getClientId())
-                .flatMap(client -> {
-                    if (client == null) {
-                        logger.warn("Cliente no encontrado o inactivo para el pedido: {}", order.getOrderId());
-                        return Mono.empty();
-                    }
+            String lockKey = "client-lock-" + order.getClientId();
+            RLock lock = redissonClient.getLock(lockKey);
 
-                    return orderValidator.validateProducts(order.getProducts())
-                        .flatMap(products -> {
-                            if (products == null || products.size() == 0) {
-                                logger.warn("Productos inválidos o sin stock para el pedido: {}", order.getOrderId());
+            boolean isLocked = false;
+            try {
+                isLocked = lock.tryLock(10, 30, TimeUnit.SECONDS); 
+
+                if (isLocked) {
+                    orderValidator.validateClient(order.getClientId())
+                        .flatMap(client -> {
+                            if (client == null) {
+                                logger.warn("Cliente no encontrado o inactivo para el pedido: {}", order.getOrderId());
                                 return Mono.empty();
                             }
-
-                            List<ProductItem> updatedProducts = order.getProducts().stream()
-                                .map(productItem -> {
-                                    Product productFromApi = products.stream()
-                                        .filter(p -> p.getId() == productItem.getProductId())
-                                        .findFirst()
-                                        .orElse(null);
-
-                                    if (productFromApi != null) {
-                                        productItem.setPrice(productFromApi.getPrice());
+                            return orderValidator.validateProducts(order.getProducts())
+                                .flatMap(products -> {
+                                    if (products.isEmpty()) {
+                                        logger.warn("Productos inválidos o sin stock para el pedido: {}", order.getOrderId());
+                                        return Mono.empty();
                                     }
 
-                                    return productItem;
-                                })
-                                .collect(Collectors.toList());
+                                    OrderDocument orderDocument = new OrderDocument();
+                                    orderDocument.setOrderId(order.getOrderId());
+                                    orderDocument.setCustomerId(order.getClientId());
+                                    orderDocument.setCustomerName(client.getName());
+                                    orderDocument.setProducts(order.getProducts());
 
-                            OrderDocument orderDocument = new OrderDocument();
-                            orderDocument.setOrderId(order.getOrderId());
-                            orderDocument.setCustomerId(order.getClientId());
-                            orderDocument.setCustomerName(client.getName());
-                            orderDocument.setProducts(updatedProducts);
-
-                            return orderRepository.save(orderDocument)
-                                .doOnSuccess(savedOrder -> logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId()));
-                        });
-                })
-                .doOnError(e -> logger.error("Error en la validación o procesamiento del pedido: {}", order.getOrderId(), e))
-                .subscribe();
+                                    return orderRepository.save(orderDocument)
+                                        .doOnSuccess(savedOrder -> logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId()));
+                                });
+                        })
+                        .doOnError(e -> logger.error("Error en la validación o procesamiento del pedido: {}", order.getOrderId(), e))
+                        .subscribe();
+                } else {
+                    logger.warn("No se pudo adquirir el lock para el cliente: {}. Otro proceso ya está manejando este pedido.", order.getClientId());
+                }
+            } catch (InterruptedException e) {
+                logger.error("Error al intentar adquirir el lock para el cliente: {}", order.getClientId(), e);
+                Thread.currentThread().interrupt();
+            } finally {
+                if (isLocked) {
+                    lock.unlock();
+                }
+            }
 
         } catch (Exception e) {
             logger.error("Error al parsear el mensaje: {}", message, e);
