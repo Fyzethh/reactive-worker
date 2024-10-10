@@ -41,54 +41,55 @@ public class OrderConsumerService {
     @KafkaListener(topics = "orders", groupId = "order-group")
     public void consume(String message) {
         logger.info("Mensaje recibido del tópico: {}", message);
-
+    
         try {
             Order order = objectMapper.readValue(message, Order.class);
-
+            order.setOriginalMessage(message);
+    
             if (order.getClientId() == null || order.getProducts() == null || order.getProducts().isEmpty()) {
                 logger.error("Datos del pedido inválidos: clientId o productos faltantes");
                 return;
             }
-
+    
             String lockKey = "client-lock-" + order.getClientId();
             RLock lock = redissonClient.getLock(lockKey);
-
+    
             boolean isLocked = false;
             try {
                 isLocked = lock.tryLock(10, 30, TimeUnit.SECONDS);
-
+    
                 if (isLocked) {
-                    orderValidator.validateClient(order.getClientId())
+                    orderValidator.validateClient(order)
                         .flatMap(client -> {
                             if (client == null) {
                                 logger.warn("Cliente no encontrado o inactivo para el pedido: {}", order.getOrderId());
                                 return Mono.empty();
                             }
-                            return orderValidator.validateProducts(order.getProducts())
+                            return orderValidator.validateProducts(order)
                                 .flatMap(products -> {
                                     if (products.isEmpty()) {
                                         logger.warn("Productos inválidos o sin stock para el pedido: {}", order.getOrderId());
                                         return Mono.empty();
                                     }
-
+    
                                     OrderDocument orderDocument = new OrderDocument();
                                     orderDocument.setOrderId(order.getOrderId());
                                     orderDocument.setCustomerId(order.getClientId());
                                     orderDocument.setCustomerName(client.getName());
                                     orderDocument.setProducts(order.getProducts());
-
+    
                                     return orderRepository.save(orderDocument)
                                         .flatMap(savedOrder -> {
                                             logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId());
-                                            
+    
                                             List<Map<String, Integer>> stockUpdates = order.getProducts().stream()
                                                 .map(product -> Map.of(
                                                     "product_id", product.getProductId(),
                                                     "quantity", product.getQuantity()
                                                 ))
                                                 .collect(Collectors.toList());
-
-                                            return apiClient.makeRequestForMono("/products/stock", HttpMethod.PATCH, null, stockUpdates, Void.class)
+    
+                                            return apiClient.makeRequestForMono("/products/stock", HttpMethod.PATCH, null, stockUpdates, Void.class, order)
                                                 .flatMap(response -> {
                                                     logger.info("Stock actualizado correctamente para el pedido: {}", order.getOrderId());
                                                     return Mono.just(savedOrder);
@@ -113,9 +114,10 @@ public class OrderConsumerService {
                     lock.unlock();
                 }
             }
-
+    
         } catch (Exception e) {
             logger.error("Error al parsear el mensaje: {}", message, e);
         }
     }
+    
 }
