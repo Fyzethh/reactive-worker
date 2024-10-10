@@ -95,7 +95,7 @@ volumes:
   mysqldata:
     driver: local
   mongodata:
-    driver: local
+     driver: local
   redis-data:
     driver: local
 

@@ -10,11 +10,15 @@ import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Service
 public class OrderConsumerService {
@@ -23,12 +27,14 @@ public class OrderConsumerService {
     private final OrderValidator orderValidator;
     private final OrderRepository orderRepository;
     private final RedissonClient redissonClient;
+    private final ApiClient apiClient;
     private final ObjectMapper objectMapper;
 
-    public OrderConsumerService(OrderValidator orderValidator, OrderRepository orderRepository, RedissonClient redissonClient) {
+    public OrderConsumerService(OrderValidator orderValidator, OrderRepository orderRepository, RedissonClient redissonClient, ApiClient apiClient) {
         this.orderValidator = orderValidator;
         this.orderRepository = orderRepository;
         this.redissonClient = redissonClient;
+        this.apiClient = apiClient;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -49,7 +55,7 @@ public class OrderConsumerService {
 
             boolean isLocked = false;
             try {
-                isLocked = lock.tryLock(10, 30, TimeUnit.SECONDS); 
+                isLocked = lock.tryLock(10, 30, TimeUnit.SECONDS);
 
                 if (isLocked) {
                     orderValidator.validateClient(order.getClientId())
@@ -72,7 +78,26 @@ public class OrderConsumerService {
                                     orderDocument.setProducts(order.getProducts());
 
                                     return orderRepository.save(orderDocument)
-                                        .doOnSuccess(savedOrder -> logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId()));
+                                        .flatMap(savedOrder -> {
+                                            logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId());
+                                            
+                                            List<Map<String, Integer>> stockUpdates = order.getProducts().stream()
+                                                .map(product -> Map.of(
+                                                    "product_id", product.getProductId(),
+                                                    "quantity", product.getQuantity()
+                                                ))
+                                                .collect(Collectors.toList());
+
+                                            return apiClient.makeRequestForMono("/products/stock", HttpMethod.PATCH, null, stockUpdates, Void.class)
+                                                .flatMap(response -> {
+                                                    logger.info("Stock actualizado correctamente para el pedido: {}", order.getOrderId());
+                                                    return Mono.just(savedOrder);
+                                                })
+                                                .onErrorResume(e -> {
+                                                    logger.error("Error al actualizar el stock de productos: {}", e.getMessage());
+                                                    return Mono.empty();
+                                                });
+                                        });
                                 });
                         })
                         .doOnError(e -> logger.error("Error en la validación o procesamiento del pedido: {}", order.getOrderId(), e))
