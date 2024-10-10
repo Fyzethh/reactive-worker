@@ -1,7 +1,9 @@
 package com.demo.worker.worker.service;
 
+import com.demo.worker.worker.model.Client;
 import com.demo.worker.worker.model.Order;
 import com.demo.worker.worker.model.OrderDocument;
+import com.demo.worker.worker.model.Product;
 import com.demo.worker.worker.model.ProductItem;
 import com.demo.worker.worker.repository.OrderRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,6 +15,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 public class OrderConsumerService {
@@ -41,28 +44,43 @@ public class OrderConsumerService {
             }
 
             orderValidator.validateClient(order.getClientId())
-                .flatMap(isClientValid -> {
-                    if (!isClientValid) {
+                .flatMap(client -> {
+                    if (client == null) {
                         logger.warn("Cliente no encontrado o inactivo para el pedido: {}", order.getOrderId());
                         return Mono.empty();
                     }
 
-                    return orderValidator.validateProducts(order.getProducts());
-                })
-                .flatMap(isProductsValid -> {
-                    if (!isProductsValid) {
-                        logger.warn("Productos inválidos o sin stock para el pedido: {}", order.getOrderId());
-                        return Mono.empty();
-                    }
+                    return orderValidator.validateProducts(order.getProducts())
+                        .flatMap(products -> {
+                            if (products == null || products.size() == 0) {
+                                logger.warn("Productos inválidos o sin stock para el pedido: {}", order.getOrderId());
+                                return Mono.empty();
+                            }
 
-                    OrderDocument orderDocument = new OrderDocument();
-                    orderDocument.setOrderId(order.getOrderId());
-                    orderDocument.setCustomerId(order.getClientId());
-                    orderDocument.setCustomerName("Nombre del Cliente"); 
-                    orderDocument.setProducts(order.getProducts());
+                            List<ProductItem> updatedProducts = order.getProducts().stream()
+                                .map(productItem -> {
+                                    Product productFromApi = products.stream()
+                                        .filter(p -> p.getId() == productItem.getProductId())
+                                        .findFirst()
+                                        .orElse(null);
 
-                    return orderRepository.save(orderDocument)
-                        .doOnSuccess(savedOrder -> logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId()));
+                                    if (productFromApi != null) {
+                                        productItem.setPrice(productFromApi.getPrice());
+                                    }
+
+                                    return productItem;
+                                })
+                                .collect(Collectors.toList());
+
+                            OrderDocument orderDocument = new OrderDocument();
+                            orderDocument.setOrderId(order.getOrderId());
+                            orderDocument.setCustomerId(order.getClientId());
+                            orderDocument.setCustomerName(client.getName());
+                            orderDocument.setProducts(updatedProducts);
+
+                            return orderRepository.save(orderDocument)
+                                .doOnSuccess(savedOrder -> logger.info("Pedido guardado correctamente con ID: {}", savedOrder.getOrderId()));
+                        });
                 })
                 .doOnError(e -> logger.error("Error en la validación o procesamiento del pedido: {}", order.getOrderId(), e))
                 .subscribe();
