@@ -10,7 +10,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Flux;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -26,19 +28,11 @@ public class ApiClient {
     }
 
     public <T> Mono<T> makeRequestForMono(String url, HttpMethod method, Map<String, String> headers, Object body, Class<T> responseType) {
-        WebClient.RequestBodySpec requestSpec = webClient.method(method).uri(url);
+        return makeRequest(url, method, headers, body, responseType, Mono.class);
+    }
 
-        if (headers != null && !headers.isEmpty()) {
-            headers.forEach(requestSpec::header);
-        }
-
-        if (body != null) {
-            requestSpec.contentType(MediaType.APPLICATION_JSON).bodyValue(body);
-        }
-
-        return requestSpec.retrieve()
-                .bodyToMono(responseType)
-                .doOnError(e -> logger.error("Error while making request: ", e));
+    public <T> Flux<T> makeRequestForFlux(String url, HttpMethod method, Map<String, String> headers, Object body, Class<T> responseType) {
+        return makeRequest(url, method, headers, body, responseType, Flux.class);
     }
 
     public Flux<Product> getProductsByIds(List<Integer> productIds) {
@@ -46,32 +40,35 @@ public class ApiClient {
                                                  .map(String::valueOf)
                                                  .collect(Collectors.joining("&ids="));
 
-        return webClient.get()
-                .uri(url)
-                .accept(MediaType.APPLICATION_JSON)
-                .retrieve()
-                .bodyToFlux(Product.class)
-                .doOnError(e -> logger.error("Error while making request: ", e));
+        return makeRequestForFlux(url, HttpMethod.GET, null, null, Product.class)
+                .doOnError(e -> logger.error("Error while retrieving products by IDs: ", e));
     }
 
-    public <T> Flux<T> makeRequestForFlux(String url, HttpMethod method, Map<String, String> headers, Object body, Class<T> responseType) {
+    private <T, R> R makeRequest(String url, HttpMethod method, Map<String, String> headers, Object body, Class<T> responseType, Class<R> returnType) {
         WebClient.RequestBodySpec requestSpec = webClient.method(method).uri(url);
-    
+
         if (headers != null && !headers.isEmpty()) {
             headers.forEach(requestSpec::header);
         }
-    
+
         if (body != null) {
             requestSpec.contentType(MediaType.APPLICATION_JSON).bodyValue(body);
         }
-    
-        return requestSpec.retrieve()
+
+        WebClient.ResponseSpec responseSpec = requestSpec.retrieve()
                 .onStatus(
                     status -> !status.is2xxSuccessful(),
                     clientResponse -> clientResponse.createException()
-                )
-                .bodyToFlux(responseType)
-                .doOnError(e -> logger.error("Error while making request: ", e));
+                );
+
+        if (returnType.equals(Mono.class)) {
+            return (R) responseSpec.bodyToMono(responseType)
+                    .retryWhen(Retry.backoff(3, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(10)))
+                    .doOnError(e -> logger.error("Error while making request: ", e));
+        } else {
+            return (R) responseSpec.bodyToFlux(responseType)
+                    .retryWhen(Retry.backoff(3, Duration.ofSeconds(1)).maxBackoff(Duration.ofSeconds(10)))
+                    .doOnError(e -> logger.error("Error while making request: ", e));
+        }
     }
-    
 }
