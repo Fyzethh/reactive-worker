@@ -53,4 +53,25 @@ public class ApiClient {
                 .bodyToFlux(Product.class)
                 .doOnError(e -> logger.error("Error while making request: ", e));
     }
+
+    public <T> Flux<T> makeRequestForFlux(String url, HttpMethod method, Map<String, String> headers, Object body, Class<T> responseType) {
+        WebClient.RequestBodySpec requestSpec = webClient.method(method).uri(url);
+    
+        if (headers != null && !headers.isEmpty()) {
+            headers.forEach(requestSpec::header);
+        }
+    
+        if (body != null) {
+            requestSpec.contentType(MediaType.APPLICATION_JSON).bodyValue(body);
+        }
+    
+        return requestSpec.retrieve()
+                .onStatus(
+                    status -> !status.is2xxSuccessful(),
+                    clientResponse -> clientResponse.createException()
+                )
+                .bodyToFlux(responseType)
+                .doOnError(e -> logger.error("Error while making request: ", e));
+    }
+    
 }

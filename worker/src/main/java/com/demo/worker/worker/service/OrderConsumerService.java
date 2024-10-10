@@ -38,17 +38,17 @@ public class OrderConsumerService {
                 .flatMap(isClientValid -> {
                     if (!isClientValid) {
                         logger.warn("Cliente no encontrado o inactivo para el pedido: {}", order.getOrderId());
-                        return Mono.empty(); 
+                        return Mono.empty();
                     }
 
                     return orderValidator.validateProducts(
                             order.getProducts().stream().map(p -> p.getProductId()).collect(Collectors.toList())
-                    );
+                    ).map(areProductsValid -> new ValidationResult(isClientValid, areProductsValid));
                 })
-                .flatMap(areProductsValid -> {
-                    if (!areProductsValid) {
-                        logger.warn("Productos inválidos para el pedido: {}", order.getOrderId());
-                        return Mono.empty(); 
+                .flatMap(validationResult -> {
+                    if (!validationResult.areProductsValid) {
+                        logger.warn("Algunos productos no tienen stock suficiente para el pedido: {}", order.getOrderId());
+                        return Mono.empty();
                     }
 
                     logger.info("Pedido válido procesado: {}", order.getOrderId());
@@ -59,6 +59,16 @@ public class OrderConsumerService {
 
         } catch (Exception e) {
             logger.error("Error al parsear el mensaje: {}", message, e);
+        }
+    }
+
+    private static class ValidationResult {
+        private final boolean isClientValid;
+        private final boolean areProductsValid;
+
+        public ValidationResult(boolean isClientValid, boolean areProductsValid) {
+            this.isClientValid = isClientValid;
+            this.areProductsValid = areProductsValid;
         }
     }
 }

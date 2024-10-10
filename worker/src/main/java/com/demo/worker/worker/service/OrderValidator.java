@@ -6,14 +6,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Map;
+import java.util.stream.Collectors; 
 
 @Service
 public class OrderValidator {
-
     private static final Logger logger = LoggerFactory.getLogger(OrderValidator.class);
     private final ApiClient apiClient;
 
@@ -32,36 +33,32 @@ public class OrderValidator {
                         return false;
                     }
                 })
-                .onErrorResume(e -> {
-                    if (e instanceof org.springframework.web.reactive.function.client.WebClientResponseException.NotFound) {
-                        logger.warn("Cliente {} no encontrado.", clientId);
-                        return Mono.just(false);
-                    } else {
-                        logger.error("Error al validar el cliente: {}", clientId, e);
-                        return Mono.just(false);
-                    }
-                })
-                .defaultIfEmpty(false);
+                .defaultIfEmpty(false)
+                .doOnError(e -> logger.error("Error al validar el cliente: {}", clientId, e));
     }
 
-
     public Mono<Boolean> validateProducts(List<Integer> productIds) {
-        String ids = productIds.stream()
-                .map(String::valueOf)
-                .collect(Collectors.joining("&ids="));
+        String ids = productIds.stream().map(String::valueOf).collect(Collectors.joining("&ids="));
         String url = "/products/?ids=" + ids;
     
-        return apiClient.makeRequestForMono(url, HttpMethod.GET, null, null, Product[].class)
+        return apiClient.makeRequestForFlux(url, HttpMethod.GET, null, null, Product.class)
+                .collectList()
                 .map(products -> {
-                    if (products != null && products.length > 0) {
-                        logger.info("Productos {} son válidos.", productIds);
-                        return true;
-                    } else {
-                        logger.warn("Los productos {} no son válidos o no se encontraron.", productIds);
+                    if (products == null || products.isEmpty()) {
+                        logger.warn("No se encontraron productos para los IDs: {}", productIds);
                         return false;
                     }
+    
+                    boolean allInStock = products.stream().allMatch(product -> product.getStock() > 0);
+                    if (allInStock) {
+                        logger.info("Todos los productos {} tienen stock disponible.", productIds);
+                    } else {
+                        logger.warn("Algunos productos no tienen stock suficiente para los IDs: {}", productIds);
+                    }
+                    return allInStock;
                 })
                 .defaultIfEmpty(false)
                 .doOnError(e -> logger.error("Error al validar los productos: {}", productIds, e));
     }
+    
 }
